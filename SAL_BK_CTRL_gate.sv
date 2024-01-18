@@ -1,6 +1,6 @@
 `include "TIME_SCALE.svh"
 `include "SAL_DDR_PARAMS.svh"
-
+minji;
 module SAL_BK_CTRL
 #(
     parameter                   BK_ID   = 0
