@@ -2,7 +2,7 @@
 `include "SAL_DDR_PARAMS.svh"
 //This is for the gated SR latch module.
 
-module SAL_BK_CTRL_GATELEVEL
+module SAL_BK_CTRL
 #(
     parameter                   BK_ID   = 0
 )
@@ -53,33 +53,16 @@ module SAL_BK_CTRL_GATELEVEL
                                 is_t_rfc_met,
                                 is_row_open_met;
                                 
-                                                       
-
-    // tried to make similar to the state machine
-    // in the Micron dataset. Can eliminate some states
-    enum    logic   [2:0]   {
-        S_IDLE                  = 'd0,
-        S_ACTIVATING            = 'd1,
-        S_BANK_ACTIVE           = 'd2,
-        S_READING               = 'd3,
-        S_WRITING               = 'd4,
-        S_PRECHARGING           = 'd5,
-        S_REFRESHING            = 'd6
-    } state,    state_n;
-
     always_ff @(posedge clk)
         if (~rst_n) begin
-            state                   <= S_IDLE;
             cur_ra                  <= 'h0;
         end
         else begin
-            state                   <= state_n;
-            cur_ra                  <= cur_ra_n;
+            //cur_ra                  <= cur_ra_n;
         end
 
-    always_comb begin
-        cur_ra_n                    = cur_ra;
-        state_n                     = state;
+    initial begin
+        //cur_ra_n                    = cur_ra;
 
         ref_gnt_o                   = 1'b0;
         req_if.ready                = 1'b0;
@@ -101,7 +84,6 @@ module SAL_BK_CTRL_GATELEVEL
     wire READING;
     wire PRECHARGING;
     wire REFRESHING;
-    wire DEFAULT;
     wire wire_id_act_gnt;
     wire wire_ac;
     wire wire_wr;
@@ -120,24 +102,28 @@ module SAL_BK_CTRL_GATELEVEL
     wire req_wr_not;
     wire wire_ba_rd;
     wire wire_ba_rd_last;
-    wire wr_req_o;
+    wire wire_ba_met_1;
+    wire ba_eq_ra_not;
+    wire ba_met_valid;
+    wire ba_pre_state;
+    wire wire_ba_valid_not;
 
 //----------------------------------------------------------------------------------------------------------------------------------------------------------//
 //                                                                         IDLE                                                                             //
 //----------------------------------------------------------------------------------------------------------------------------------------------------------//
 
     AND3    id_act_req      (.A1(IDLE), .A2(req_if.valid), .A3(is_t_rc_met), .Y(act_req_o));             //assign act_req_o
-    AND2    id_act_gnt      (.A1(act_req_0), .A2(act_gnt_i), Y(wire_id_act_gnt));                        //assign_wire_id_act_gnt 
+    AND2    id_act_gnt      (.A1(act_req_0), .A2(act_gnt_i), .Y(wire_id_act_gnt));                       //assign_wire_id_act_gnt 
 
     MUX21   id_state_1      (.A1(1'b1), .A2(1'b0), .S0(wire_id_act_gnt), .Y(ACTIVATING));                // ACTIVATING set
     MUX21   id_state_2      (.A1(1'b0), .A2(1'b1), .S0(wire_id_act_gnt), .Y(IDLE));                      // IDLE set
 
-    DFF     id_ff_cur_ra    (.D(req_if.ra), .RST_n(act_req_o), .CLK(clk), .Q(ra_o), .QN());              // ra_o = req_if.ra
-    DFF     id_ff_cur_ra    (.D(req_if.ra), .RST_n(act_req_o), .CLK(clk), .Q(seq_num_o), .QN());         // seq_num = req_if.seq_num
+    DFF     id_ff_ra_o      (.D(req_if.ra), .RST_n(act_req_o), .CLK(clk), .Q(ra_o), .QN());              // ra_o = req_if.ra
+    DFF     id_ff_seq_num   (.D(req_if.seq_num), .RST_n(act_req_o), .CLK(clk), .Q(seq_num_o), .QN());    // seq_num = req_if.seq_num
     DFF     id_ff_cur_ra    (.D(req_if.ra), .RST_n(wire_id_act_gnt), .CLK(clk), .Q(cur_ra_n), .QN());    // cur_ra_n = req_if.ra
 
     AND3    id_ref_req      (.A1(IDLE), .A2(ref_req_i), .A3(is_t_rc_met), .Y(ref_req_o));                //assign ref_req_o
-    AND2    id_ref_gnt      (.A1(ref_req_0), .A2(ref_gnt_i), Y(ref_gnt_o));                              //assign ref_gnt_i
+    AND2    id_ref_gnt      (.A1(ref_req_0), .A2(ref_gnt_i), .Y(ref_gnt_o));                             //assign ref_gnt_i
 
     MUX21   id_state_3      (.A1(1'b1), .A2(1'b0), .S0(ref_gnt_o), .Y(REFRESHING));                      // REFRESHING set
     MUX21   id_state_4      (.A1(1'b0), .A2(1'b1), .S0(ref_gnt_o), .Y(IDLE));                            // IDLE set
@@ -146,7 +132,7 @@ module SAL_BK_CTRL_GATELEVEL
 //                                                                      ACTIVATING                                                                          //
 //----------------------------------------------------------------------------------------------------------------------------------------------------------//
 
-    AND2    ac_1            (.A1(ACTIVATING), .A2(is_t_rrd_met), Y(wire_ac));                            // assign wire_ac
+    AND2    ac_1            (.A1(ACTIVATING), .A2(is_t_rrd_met), .Y(wire_ac));                           // assign wire_ac
 
     MUX21   ac_state_1      (.A1(1'b1), .A2(1'b0), .S0(wire_ac), .Y(BANKACTIVE));                        // BANKACTIVE set
     MUX21   ac_state_2      (.A1(1'b0), .A2(1'b1), .S0(wire_ac), .Y(ACTIVATING));                        // ACTIVATING set
@@ -154,48 +140,74 @@ module SAL_BK_CTRL_GATELEVEL
 //----------------------------------------------------------------------------------------------------------------------------------------------------------//
 //                                                                      BANK_ACTIVE                                                                         //
 //----------------------------------------------------------------------------------------------------------------------------------------------------------//
-
-    AND2    ba_valid        (.A1(ACTIVATING), .A2(is_t_rrd_met), Y(wire_ba_valid));                      // assign wire_ba_valid
-
+// WRITING/READING
+    AND2    ba_valid        (.A1(BANKACTIVE), .A2(req_if.valid), .Y(wire_ba_valid));                      // assign wire_valid
+    
     // equivant gate begin
-    INV     ba_eq_inv_1     (.A(cur_ra), .Y(cur_ra_not));                                                // assign cur_ra_not
-    INV     ba_eq_inv_2     (.A(req_if.ra), .Y(req_ra_not));                                             // assign req_ra_not
-    AND2    ba_eq_and_1     (.A1(cur_ra), .A2(req_if.ra), Y(wire_eq_and_1));                             // assign wire_eq_and_1
-    AND2    ba_eq_and_2     (.A1(cur_ra_not), .A2(req_ra_not), Y(wire_eq_and_2));                        // assign wire_eq_and_2
-    OR2     ba_eq_or_1      (.A1(wire_eq_and_1), .A2(wire_eq_and_2), .Y(ba_eq_ra));                      // assign ra_equivalent
+    INV     ba_eq_inv_1     (.A(cur_ra), .Y(cur_ra_not));                                                 // assign cur_ra_not
+    INV     ba_eq_inv_2     (.A(req_if.ra), .Y(req_ra_not));                                              // assign req_ra_not
+    AND2    ba_eq_and_1     (.A1(cur_ra), .A2(req_if.ra), .Y(wire_eq_and_1));                             // assign wire_eq_and_1
+    AND2    ba_eq_and_2     (.A1(cur_ra_not), .A2(req_ra_not), .Y(wire_eq_and_2));                        // assign wire_eq_and_2
+    OR2     ba_eq_or_1      (.A1(wire_eq_and_1), .A2(wire_eq_and_2), .Y(ba_eq_ra));                       // assign ra_equivalent
     // equivalent gate end
 
-    AND2    ba_and_eq       (.A1(wire_ba_valid), .A2(ba_eq_ra), Y(wire_ba_eq));                          // assign wire_ba_eq
-    AND2    ba_wr           (.A1(req_if.ra), .A2(wire_ba_eq), Y(wire_ba_wr));                            // assign wire_ba_wr
-    AND2    ba_wr_gnt       (.A1(wr_gnt_i), .A2(wire_ba_wr), Y(wire_ba_wr_last));                        // assign wire_ba_wr_last
+    AND2    ba_and_eq       (.A1(wire_ba_valid), .A2(ba_eq_ra), .Y(wire_ba_eq));                          // assign wire_ba_eq
+    AND2    ba_wr           (.A1(req_if.ra), .A2(wire_ba_eq), .Y(wire_ba_wr));                            // assign wire_ba_wr
+    AND2    ba_wr_gnt       (.A1(wr_gnt_i), .A2(wire_ba_wr), .Y(wire_ba_wr_last));                        // assign wire_ba_wr_last
 
-    INV     ba_wr_inv       (.A(req_if.ra), .Y(req_wr_not));                                             // assign req_wr_not
+    INV     ba_wr_inv       (.A(req_if.ra), .Y(req_wr_not));                                              // assign req_wr_not
 
-    AND2    ba_rd           (.A1(wire_ba_eq), .A2(req_wr_not), Y(wire_ba_rd));                           // assign wire_ba_rd
-    AND2    ba_rd_gnt       (.A1(rd_gnt_i), .A2(wire_ba_rd), Y(wire_ba_rd_last));                        // assign wire_ba_rd_last
+    AND2    ba_rd           (.A1(wire_ba_eq), .A2(req_wr_not), .Y(wire_ba_rd));                           // assign wire_ba_rd
+    AND2    ba_rd_gnt       (.A1(rd_gnt_i), .A2(wire_ba_rd), .Y(wire_ba_rd_last));                        // assign wire_ba_rd_last
 
-    MUX21   ba_state_1      (.A1(1'b1), .A2(1'b0), .S0(wire_ba_wr_last), .Y(WRITING));                   // WRITING set
-    MUX21   ba_state_2      (.A1(1'b0), .A2(1'b1), .S0(wire_ba_wr_last), .Y(BANKACTIVE));                // BANKACTIVE set
+    MUX21   ba_state_1      (.A1(1'b1), .A2(1'b0), .S0(wire_ba_wr_last), .Y(WRITING));                    // WRITING set
+    MUX21   ba_state_2      (.A1(1'b0), .A2(1'b1), .S0(wire_ba_wr_last), .Y(BANKACTIVE));                 // BANKACTIVE set
 
-    DFF     ba_ff_ca_o      (.D(req_if.ca), .RST_n(wire_ba_eq), .CLK(clk), .Q(ca_o), .QN());             // ca_o = req_if.ca
-    DFF     ba_ff_id_o      (.D(req_if.id), .RST_n(wire_ba_eq), .CLK(clk), .Q(id_o), .QN());             // id_o = req_if.id
-    DFF     ba_ff_len_o     (.D(req_if.len), .RST_n(wire_ba_eq), .CLK(clk), .Q(len_o), .QN());           // len_o = req_if.len
-    DFF     ba_ff_seq_o     (.D(req_if.seq_num), .RST_n(wire_ba_eq), .CLK(clk), .Q(seq_num_o), .QN());   // seq_num_o = req_if.seq_num
+    DFF     ba_ff_ca_o      (.D(req_if.ca), .RST_n(wire_ba_eq), .CLK(clk), .Q(ca_o), .QN());              // ca_o = req_if.ca
+    DFF     ba_ff_id_o      (.D(req_if.id), .RST_n(wire_ba_eq), .CLK(clk), .Q(id_o), .QN());              // id_o = req_if.id
+    DFF     ba_ff_len_o     (.D(req_if.len), .RST_n(wire_ba_eq), .CLK(clk), .Q(len_o), .QN());            // len_o = req_if.len
+    DFF     ba_ff_seq_o     (.D(req_if.seq_num), .RST_n(wire_ba_eq), .CLK(clk), .Q(seq_num_o), .QN());    // seq_num_o = req_if.seq_num
 
-    MUX21   ba_wr_req       (.A1(1'b1), .A2(1'b0), .S0(wire_ba_wr), .Y(wr_req_o));                       // wr_req_o set
-    MUX21   ba_wr_ready     (.A1(1'b1), .A2(1'b0), .S0(wire_ba_wr_last), .Y(req_if.ready));              // req_if.ready set
+    MUX21   ba_wr_req       (.A1(1'b1), .A2(1'b0), .S0(wire_ba_wr), .Y(wr_req_o));                        // wr_req_o set
+    MUX21   ba_wr_ready     (.A1(1'b1), .A2(1'b0), .S0(wire_ba_wr_last), .Y(req_if.ready));               // req_if.ready set
 
-    MUX21   ba_state_3      (.A1(1'b1), .A2(1'b0), .S0(wire_ba_rd_last), .Y(READING));                   // READING set
-    MUX21   ba_state_4      (.A1(1'b0), .A2(1'b1), .S0(wire_ba_rd_last), .Y(BANKACTIVE));                // BANKACTIVE set
+    MUX21   ba_state_3      (.A1(1'b1), .A2(1'b0), .S0(wire_ba_rd_last), .Y(READING));                    // READING set
+    MUX21   ba_state_4      (.A1(1'b0), .A2(1'b1), .S0(wire_ba_rd_last), .Y(BANKACTIVE));                 // BANKACTIVE set
 
-    MUX21   ba_rd_req       (.A1(1'b1), .A2(1'b0), .S0(wire_ba_rd), .Y(rd_req_o));                       // rd_req_o set
-    MUX21   ba_rd_ready     (.A1(1'b1), .A2(1'b0), .S0(wire_ba_rd_last), .Y(req_if.ready));              // req_if.ready set
+    MUX21   ba_rd_req       (.A1(1'b1), .A2(1'b0), .S0(wire_ba_rd), .Y(rd_req_o));                        // rd_req_o set
+    MUX21   ba_rd_ready     (.A1(1'b1), .A2(1'b0), .S0(wire_ba_rd_last), .Y(req_if.ready));               // req_if.ready set
+
+// PRECHERGING_1
+
+    AND3    ba_met_1        (.A1(is_t_ras_met), .A2(is_t_rtp_met), .A3(is_t_wtp_met), .Y(wire_ba_met_1)); // wire_be_met_1
+    INV     ba_eq_inv_1     (.A(ba_eq_ra), .Y(ba_eq_ra_not));                                             // assign ba_eq_ra_not
+    AND3    ba_pre_1        (.A1(wire_ba_met_1), .A2(wire_ba_valid), .A3(ba_eq_ra_not), .Y(ba_met_valid));// ba_met_valid
+    AND2    ba_pre_gnt      (.A1(pre_gnt_i), .A2(ba_met_valid), .Y(ba_pre_state));
+
+    MUX21   ba_state_5      (.A1(1'b1), .A2(1'b0), .S0(ba_pre_state), .Y(PRECHARGING));                   // PRECHARGING set
+    MUX21   ba_state_6      (.A1(1'b0), .A2(1'b1), .S0(ba_pre_state), .Y(BANKACTIVE));                    // BANKACTIVE set
+
+    MUX21   ba_wr_req       (.A1(1'b1), .A2(1'b0), .S0(ba_met_valid), .Y(pre_req_o));                     // pre_req_o set
+
+// PRECHARGING_2
+
+    INV     valid_not       (.A(req_if.valid), .Y(req_valid_not));   
+    AND2    ba_valid_not    (.A1(BANKACTIVE), .A2(req_valid_not), .Y(wire_ba_valid_not));
+    AND2    ba_met_2        (.A1(is_row_open_met), .A2(is_t_ras_met), .Y(wire_ba_met_2));
+    AND2    ba_met_3        (.A1(is_rtp_met), .A2(is_t_wtp_met), .Y(wire_be_met_3));
+    AND3    ba_pre_2        (.A1(wire_ba_valid_not), .A2(wire_ba_met_2), .A3(wire_be_met_3), .Y(ba_met_valid_not));
+    AND2    ba_pre_gnt_2    (.A1(pre_gnt_i), .A2(ba_met_valid_not), .Y(ba_pre_state_2));
+
+    MUX21   ba_state_5      (.A1(1'b1), .A2(1'b0), .S0(ba_pre_state_2), .Y(PRECHARGING));                  // PRECHARGING set
+    MUX21   ba_state_6      (.A1(1'b0), .A2(1'b1), .S0(ba_pre_state_2), .Y(BANKACTIVE));                   // BANKACTIVE set
+
+    MUX21   ba_wr_req       (.A1(1'b1), .A2(1'b0), .S0(ba_met_valid_not), .Y(pre_req_o));                  // pre_req_o set
 
 //----------------------------------------------------------------------------------------------------------------------------------------------------------//
 //                                                                        WRITING                                                                           //
 //----------------------------------------------------------------------------------------------------------------------------------------------------------//
 
-    AND2    wr_1           (.A1(ACTIVATING), .A2(is_t_rrd_met), Y(wire_wr));                             // assign wire_ac
+    AND2    wr_1           (.A1(ACTIVATING), .A2(is_t_rrd_met), .Y(wire_wr));                             // assign wire_ac
 
     MUX21   wr_state_1     (.A1(1'b1), .A2(1'b0), .S0(wire_wr), .Y(BANKACTIVE));                         // BANKACTIVE set
     MUX21   wr_state_2     (.A1(1'b0), .A2(1'b1), .S0(wire_wr), .Y(WRITING));                            // WRITING set
@@ -204,7 +216,7 @@ module SAL_BK_CTRL_GATELEVEL
 //                                                                        READING                                                                           //
 //----------------------------------------------------------------------------------------------------------------------------------------------------------//
 
-    AND2    rd_1           (.A1(ACTIVATING), .A2(is_t_rrd_met), Y(wire_rd));                             // assign wire_ac
+    AND2    rd_1           (.A1(ACTIVATING), .A2(is_t_rrd_met), .Y(wire_rd));                             // assign wire_ac
 
     MUX21   rd_state_1     (.A1(1'b1), .A2(1'b0), .S0(wire_rd), .Y(BANKACTIVE));                         // BANKACTIVE set
     MUX21   rd_state_2     (.A1(1'b0), .A2(1'b1), .S0(wire_rd), .Y(READING));                            // READING set
@@ -213,7 +225,7 @@ module SAL_BK_CTRL_GATELEVEL
 //                                                                      PRECHARGING                                                                         //
 //----------------------------------------------------------------------------------------------------------------------------------------------------------//
 
-    AND2    pr_1           (.A1(ACTIVATING), .A2(is_t_rrd_met), Y(wire_pr));                             // assign wire_ac
+    AND2    pr_1           (.A1(ACTIVATING), .A2(is_t_rrd_met), .Y(wire_pr));                             // assign wire_ac
 
     MUX21   pr_state_1     (.A1(1'b1), .A2(1'b0), .S0(wire_pr), .Y(IDLE));                               // IDLE set
     MUX21   pr_state_2     (.A1(1'b0), .A2(1'b1), .S0(wire_pr), .Y(PRECHARGING));                        // PRECHARGING set
@@ -222,10 +234,10 @@ module SAL_BK_CTRL_GATELEVEL
 //                                                                       REFRESHING                                                                         //
 //----------------------------------------------------------------------------------------------------------------------------------------------------------//
 
-    AND2    rf_1           (.A1(ACTIVATING), .A2(is_t_rrd_met), Y(wire_rf));                             // assign wire_ac
+    AND2    rf_1           (.A1(ACTIVATING), .A2(is_t_rrd_met), .Y(wire_rf));                             // assign wire_ac
 
     MUX21   rf_state_1     (.A1(1'b1), .A2(1'b0), .S0(wire_rf), .Y(IDLE));                               // IDLE set
-    MUX21   rf_state-2     (.A1(1'b0), .A2(1'b1), .S0(wire_rf), .Y(REFRESHING));                         // REFRESHING set
+    MUX21   rf_state_2     (.A1(1'b0), .A2(1'b1), .S0(wire_rf), .Y(REFRESHING));                         // REFRESHING set
 
 //----------------------------------------------------------------------------------------------------------------------------------------------------------//
 //                                                                       TIMING_CNTR                                                                        //
